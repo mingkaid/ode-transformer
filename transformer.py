@@ -239,7 +239,7 @@ def make_model(src_vocab, tgt_vocab, N=6,
 
 
 if __name__ == '__main__':
-	transformer = make_model(10, 10,2)
+	transformer = make_model(src_vocab=10, tgt_vocab=10)
 
 
 
