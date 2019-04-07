@@ -9,7 +9,7 @@ from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn
 seaborn.set_context(context="talk")
-import transformer_functions
+from transformer_functions import clones, subsequent_mask, attention
 # %matplotlib inline
 
 
@@ -200,8 +200,8 @@ class PositionalEncoding(nn.Module):
         
         # Compute the positional encodings once in log space.
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) *
+        position = torch.arange(0.0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0.0, d_model, 2) *
                              -(math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -234,12 +234,12 @@ def make_model(src_vocab, tgt_vocab, N=6,
     # Initialize parameters with Glorot / fan_avg.
     for p in model.parameters():
         if p.dim() > 1:
-            nn.init.xavier_uniform(p)
+            nn.init.xavier_uniform_(p)
     return model
 
 
 if __name__ == '__main__':
-	transformer = make_model("src_data", "tgt_data")
+	transformer = make_model(10, 10,2)
 
 
 
