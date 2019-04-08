@@ -1,6 +1,7 @@
 # ODE Transformer
 
-
+Train ODE transformer:
+python train_ode.py
 
 Train and evaluate synthetic data: 
 python train_copy_task.py
@@ -14,3 +15,5 @@ python -m spacy download de
 python -m spacy download en
 
 python train_dataset.py
+
+
