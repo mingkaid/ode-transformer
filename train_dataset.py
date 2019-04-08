@@ -78,18 +78,32 @@ def rebatch(pad_idx, batch):
 """
 Train and evaluate
 """
+pad_idx = TGT.vocab.stoi["<blank>"]
+model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
+model.cuda()
+criterion = LabelSmoothing(size=len(TGT.vocab), padding_idx=pad_idx, smoothing=0.1)
+criterion.cuda()
+BATCH_SIZE = 12000
+train_iter = MyIterator(train, batch_size=BATCH_SIZE, device=0,
+                        repeat=False, sort_key=lambda x: (len(x.src), len(x.trg)),
+                        batch_size_fn=batch_size_fn, train=True)
+valid_iter = MyIterator(val, batch_size=BATCH_SIZE, device=0,
+                        repeat=False, sort_key=lambda x: (len(x.src), len(x.trg)),
+                        batch_size_fn=batch_size_fn, train=False)
+
+
 
 model_opt = NoamOpt(model.src_embed[0].d_model, 1, 2000,
         torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
 for epoch in range(10):
     model_par.train()
     run_epoch((rebatch(pad_idx, b) for b in train_iter), 
-              model_par, 
+              model, 
               SimpleLossCompute(model.generator, criterion, 
                                   devices=devices, opt=model_opt))
     model_par.eval()
     loss = run_epoch((rebatch(pad_idx, b) for b in valid_iter), 
-                      model_par, 
+                      model, 
                       SimpleLossCompute(model.generator, criterion, 
                       devices=devices, opt=None))
     print(loss)

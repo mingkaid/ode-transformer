@@ -46,3 +46,5 @@ model.eval()
 src = Variable(torch.LongTensor([[1,2,3,4,5,6,7,8,9,10]]) )
 src_mask = Variable(torch.ones(1, 1, 10) )
 print(greedy_decode(model, src, src_mask, max_len=10, start_symbol=1))
+
+
