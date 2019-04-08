@@ -95,9 +95,9 @@ Train and evaluate
 """
 pad_idx = TGT.vocab.stoi["<blank>"]
 model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
-# model.cuda()
+model.cuda()
 criterion = LabelSmoothing(size=len(TGT.vocab), padding_idx=pad_idx, smoothing=0.1)
-# criterion.cuda()
+criterion.cuda()
 BATCH_SIZE = 12000
 train_iter = MyIterator(train, batch_size=BATCH_SIZE, device=0,
                         repeat=False, sort_key=lambda x: (len(x.src), len(x.trg)),
