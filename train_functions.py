@@ -38,17 +38,20 @@ def run_epoch(data_iter, model, loss_compute):
     total_tokens = 0
     total_loss = 0
     tokens = 0
-    for i, batch in enumerate(data_iter):
+    i = 0
+    for _, batch in enumerate(data_iter):
         out = model.forward(batch.src, batch.trg, 
                             batch.src_mask, batch.trg_mask)
         loss = loss_compute(out, batch.trg_y, batch.ntokens)
         total_loss += loss
-        total_tokens += batch.ntokens
-        tokens += batch.ntokens
+        total_tokens += batch.ntokens.item()
+        tokens += batch.ntokens.item()
+        i += 1
+        #print(i)
         if i % 50 == 1:
             elapsed = time.time() - start
-            print("Epoch Step: %d Loss: %f Tokens per Sec: %f" %
-                    (i, loss / batch.ntokens, tokens / elapsed))
+            print("Epoch Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
+                  i, loss / batch.ntokens.item(), tokens / elapsed))
             start = time.time()
             tokens = 0
     return total_loss / total_tokens
@@ -60,16 +63,16 @@ class SimpleLossCompute:
         self.generator = generator
         self.criterion = criterion
         self.opt = opt
-        
+    
     def __call__(self, x, y, norm):
         x = self.generator(x)
         loss = self.criterion(x.contiguous().view(-1, x.size(-1)), 
-                              y.contiguous().view(-1)) / norm
+                              y.contiguous().view(-1)) / norm.float()
         loss.backward()
         if self.opt is not None:
             self.opt.step()
             self.opt.optimizer.zero_grad()
-        return loss.data * norm
+        return loss.item() * norm.float().item()
 
 
 """
