@@ -44,13 +44,17 @@ class ConcatEncoderLayer(nn.Module):
         super(ConcatEncoderLayer, self).__init__()
         module = EncoderLayer
         self._layer = module(size, self_attn, feed_forward, dropout)
-        self.size=size
+        self.size = size
+        self.mask = None
+        
+    def update_mask(self, mask):
+        self.mask = mask
     
-    def forward(self, t, x, mask):
+    def forward(self, t, x):
         # x, mask = *x
         tt = torch.ones_like(x[:, :, :1]) * t
         ttx = torch.cat([tt, x], 2)
-        return self._layer(ttx, mask)
+        return self._layer(ttx, self.mask)
 
 class OdeEncoder(nn.Module):
 
@@ -62,9 +66,10 @@ class OdeEncoder(nn.Module):
 
     def forward(self, x, mask):
         self.integration_time = self.integration_time.type_as(x)
-        odefunc = lambda t, h: self.odelayer(t, h, mask)
+        #odefunc = lambda t, h: self.odelayer(t, h, mask)
         # odefunc = self.odelayer(t, h, mask)
-        out = odeint(odefunc, x, self.integration_time, rtol=0.01, atol=0.01)
+        self.odelayer.update_mask(mask)
+        out = odeint(self.odelayer, x, self.integration_time, rtol=0.01, atol=0.01)
         return self.norm(out[1])
 
     @property
@@ -81,12 +86,17 @@ class ConcatDecoderLayer(nn.Module):
         super(ConcatDecoderLayer, self).__init__()
         module = DecoderLayer
         self._layer = module(size, self_attn, src_attn, feed_forward, dropout)
-        self.size=size
+        self.size = size
+        
+    def update_mask(self, memory, src_mask, tgt_mask):
+        self.memory = memory
+        self.src_mask = src_mask
+        self.tgt_mask = tgt_mask
     
-    def forward(self, t, x, memory, src_mask, tgt_mask):
+    def forward(self, t, x):
         tt = torch.ones_like(x[:, :, :1]) * t
         ttx = torch.cat([tt, x], 2)
-        return self._layer(ttx, memory, src_mask, tgt_mask)
+        return self._layer(ttx, self.memory, self.src_mask, self.tgt_mask)
     
 class OdeDecoder(nn.Module):
     def __init__(self, odelayer):
@@ -97,19 +107,20 @@ class OdeDecoder(nn.Module):
         
     def forward(self, x, memory, src_mask, tgt_mask):
         self.integration_time = self.integration_time.type_as(x)
-        odefunc = lambda t, h: self.odelayer(t, h, memory, src_mask, tgt_mask)
+        # odefunc = lambda t, h: self.odelayer(t, h, memory, src_mask, tgt_mask)
         # odefunc = self.odelayer(t, h, memory, src_mask, tgt_mask)
-        out = odeint(odefunc, x, self.integration_time, rtol=0.01, atol=0.01)
+        self.odelayer.update_mask(memory, src_mask, tgt_mask)
+        out = odeint(self.odelayer, x, self.integration_time, rtol=0.01, atol=0.01)
         return self.norm(out[1])
         
 
 """Make full model with given classes & functions"""
 def make_model(src_vocab, tgt_vocab, N=6, 
-               d_model=512, d_ff=2048, h=8, dropout=0.1):
+               d_model=511, d_ff=2048, h=8, dropout=0.1):
     "Helper: Construct a model from hyperparameters."
     c = copy.deepcopy
-    attn = MultiHeadedAttention(h, d_model)
-    ff = PositionwiseFeedForward(d_model, d_ff, dropout)
+    attn = MultiHeadedAttention(h, d_model + 1)
+    ff = PositionwiseFeedForward(d_model + 1, d_ff, dropout, d_out = d_model)
     position = PositionalEncoding(d_model, dropout)
     model = EncoderDecoder(
         OdeEncoder(ConcatEncoderLayer(d_model, c(attn), c(ff), dropout)),
