@@ -98,7 +98,7 @@ model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
 model.cuda()
 criterion = LabelSmoothing(size=len(TGT.vocab), padding_idx=pad_idx, smoothing=0.1)
 criterion.cuda()
-BATCH_SIZE = 12000
+BATCH_SIZE = 12
 train_iter = MyIterator(train, batch_size=BATCH_SIZE, device=0,
                         repeat=False, sort_key=lambda x: (len(x.src), len(x.trg)),
                         batch_size_fn=batch_size_fn, train=True)
