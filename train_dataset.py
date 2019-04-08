@@ -111,16 +111,16 @@ valid_iter = MyIterator(val, batch_size=BATCH_SIZE, device=0,
 model_opt = NoamOpt(model.src_embed[0].d_model, 1, 2000,
         torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
 for epoch in range(10):
-    model_par.train()
+    model.train()
     run_epoch((rebatch(pad_idx, b) for b in train_iter), 
               model, 
               SimpleLossCompute(model.generator, criterion, 
-                                  devices=devices, opt=model_opt))
-    model_par.eval()
+                                  opt=model_opt))
+    model.eval()
     loss = run_epoch((rebatch(pad_idx, b) for b in valid_iter), 
                       model, 
                       SimpleLossCompute(model.generator, criterion, 
-                      devices=devices, opt=None))
+                      opt=None))
     print(loss)
 
 
