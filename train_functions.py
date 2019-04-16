@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -6,6 +7,7 @@ import math, copy, time
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
 import seaborn
+from datetime import datetime
 from transformer_functions import subsequent_mask
 seaborn.set_context(context="talk")
 # %matplotlib inline
@@ -155,6 +157,49 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
                         torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
     return ys
 
-
+"""
+Creates checkpoint adapted to the NoamOpt training scheme
+"""
+def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/', name='checkpoint_epoch'):
+    if not os.path.isdir(path):
+        os.mkdir(path)
+    model_sd = model.state_dict()
+    opt_sd = model_opt.optimizer.state_dict()
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model_sd,
+        'optimizer_state_dict': opt_sd,
+        'noam_state_dict': {
+            'factor': model_opt.factor,
+            'model_size': model_opt.model_size,
+            'warmup': model_opt.warmup,
+            '_step': model_opt._step,
+            '_rate': model_opt._rate
+        }
+    }
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_name = '{}{}_{}.tar'.format(name, epoch, timestamp)
+    checkpoint_path = os.path.join(path, checkpoint_name)
+    torch.save(checkpoint, checkpoint_path)
+    print('Epoch {}: Checkpoint saved at {}'.format(epoch, checkpoint_path))
+    
+def load_checkpoint(model, optimizer, checkpoint_path):
+    """
+    Parameters:
+        model: An nn.Module that corresponds to the model saved in the specified checkpoint
+        optimizer: An nn.optim.Optimizer that corresponds to the underlying optimizer saved 
+            in the specified checkpoint
+        checkpoint_path: As the name suggests
+    """
+    checkpoint = torch.load(checkpoint_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    noam_state_dict = checkpoint['noam_state_dict']
+    model_opt = NoamOpt(noam_state_dict['model_size'], noam_state_dict['factor'], 
+                       noam_state_dict['warmup'], optimizer)
+    model_opt._step = noam_state_dict['_step']
+    model_opt._rate = noam_state_dict['_rate']
+    return epoch, model, model_opt
 
 
