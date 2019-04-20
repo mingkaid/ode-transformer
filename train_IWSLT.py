@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import seaborn
 seaborn.set_context(context="talk")
 
-from transformer import make_model
 from train_functions import get_std_opt, run_epoch,Batch, LabelSmoothing, NoamOpt, \
 SimpleLossCompute, greedy_decode, create_checkpoint, load_checkpoint, MultiGPULossCompute
 
@@ -24,10 +23,20 @@ parser.add_argument('--resume-checkpoint', type=str, default=None)
 parser.add_argument('--save', type=str, default='./outputs')
 parser.add_argument('--device', type=str, choices=['cuda', 'cpu'], default='cuda')
 parser.add_argument('--num-gpus', type=int, default=1)
-parser.add_argument('--train-batch-size', type=int, default=32)
+parser.add_argument('--train-batch-size', type=int, default=1000)
 parser.add_argument('--test-batch-size', type=int, default=1000)
-parser.add_argument('--num-epochs', type=int, default=20)
+parser.add_argument('--num-epochs', type=int, default=10)
+parser.add_argument('--model', type=str, choices=['transformer', 'ode'], default='ode')
+parser.add_argument('--warmup', type=int, default=2000)
+parser.add_argument('--print-interval', type=int, default=50)
 args = parser.parse_args()
+
+if args.model == 'transformer':
+    print('Regular transformer selected')
+    from transformer import make_model
+else:
+    print('ODE transformer selected')
+    from transformer_ode import make_model
 
 """
 Data Preprocessing
@@ -103,6 +112,7 @@ def rebatch(pad_idx, batch):
 
 """
 Train and evaluate
+Everything according to Vaswani et al. (2017) except warmup steps for NoamOpt
 """
 pad_idx = TGT.vocab.stoi["<blank>"]
 model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
@@ -127,15 +137,17 @@ If resuming from checkpoint, load weights and optimizer state now
 optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
 if args.resume_checkpoint != None:
     epoch, model, model_opt = load_checkpoint(model, optimizer, args.resume_checkpoint)
+    epoch += 1
     model_used = nn.DataParallel(model, device_ids=devices)
 else:
     epoch = 1
-    model_size, factor, warmup = model.src_embed[0].d_model, 1, 2000
+    model_size, factor, warmup = model.src_embed[0].d_model, 1, args.warmup
     model_opt = NoamOpt(model_size, factor, warmup, optimizer)
     model_used = model
 
 
 for i in range(epoch, epoch + args.num_epochs):
+    print('Epoch {}'.format(i))
     if args.device == 'cuda':
         train_loss_compute = MultiGPULossCompute(model.generator, criterion, 
                                                  devices=devices, opt=model_opt)
@@ -149,14 +161,15 @@ for i in range(epoch, epoch + args.num_epochs):
     model_used.train()
     run_epoch((rebatch(pad_idx, b) for b in train_iter), 
               model_used, 
-              train_loss_compute)
+              train_loss_compute, 
+              print_interval=args.print_interval)
     
     model_used.eval()
     loss = run_epoch((rebatch(pad_idx, b) for b in valid_iter), 
                      model_used, 
                      val_loss_compute)
     
-    print('Epoch {} Val Loss: {:.4f}'.format(i, loss))
+    print('Val Loss: {:.4f}'.format(loss))
     create_checkpoint(model, model_opt, i, loss, path=args.save)
 
 print('Training complete')

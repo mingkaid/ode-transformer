@@ -53,7 +53,7 @@ def run_epoch(data_iter, model, loss_compute, print_interval=50):
         if i % print_interval == 1:
             elapsed = time.time() - start
             print("Epoch Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
-                  i, loss / batch.ntokens.item(), tokens / elapsed), sep='\r')
+                  i, loss / batch.ntokens.item(), tokens / elapsed), end='\r')
             start = time.time()
             tokens = 0
     print()
@@ -238,7 +238,8 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/', name
             'warmup': model_opt.warmup,
             '_step': model_opt._step,
             '_rate': model_opt._rate
-        }
+        },
+        'val_loss': val_loss
     }
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_name = '{}{}_{}.tar'.format(name, epoch, timestamp)
@@ -263,6 +264,7 @@ def load_checkpoint(model, optimizer, checkpoint_path):
                        noam_state_dict['warmup'], optimizer)
     model_opt._step = noam_state_dict['_step']
     model_opt._rate = noam_state_dict['_rate']
+    print('Loaded checkpoint at epoch {}'.format(epoch))
     return epoch, model, model_opt
 
 
