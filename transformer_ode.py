@@ -84,12 +84,15 @@ class ODE_EncoderLayer(nn.Module):
         # self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
         
+        self.nfe = 0
+        
     def set_mask(self, mask):
         "Mandatory before calling forward, in order to set the mask for that operation"
         self.mask = mask
 
     def forward(self, t, x):
         "Follow Figure 1 (left) for connections."
+        self.nfe += 1
         # print(t)
         self_attn = lambda t, x: self.self_attn(t, x, x, x, self.mask)
         feed_forward = self.feed_forward
@@ -134,6 +137,7 @@ class ODE_DecoderLayer(nn.Module):
         self.sublayer = clones(SublayerRoutine(size, dropout), 3)        
         # self.sublayer = clones(SublayerConnection(size, dropout), 2)
         self.size = size
+        self.nfe = 0
         
     def set_forward_attributes(self, memory, src_mask, tgt_mask):
         "Mandatory before calling forward, in order to set the mask for that operation"
@@ -144,6 +148,7 @@ class ODE_DecoderLayer(nn.Module):
     def forward(self, t, x):
         "Follow Figure 1 (left) for connections."
         # print(t)
+        self.nfe += 1
         
         mh_masked = self.sublayer[0](t, x, lambda t, x: self.self_attn(t, x, x, x, self.tgt_mask))
         q = x + mh_masked
@@ -281,10 +286,11 @@ def make_model(src_vocab, tgt_vocab, N=6,
     attn = ConcatMultiHeadedAttention(h, d_model)
     ff = ConcatPositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
+    enc_layer = ODE_EncoderLayer(d_model, c(attn), c(ff), dropout)
+    dec_layer = ODE_DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout)
     model = EncoderDecoder(
-        ODE_Encoder(ODE_EncoderLayer(d_model, c(attn), c(ff), dropout)),
-        ODE_Decoder(ODE_DecoderLayer(d_model, c(attn), c(attn), 
-                                     c(ff), dropout)),
+        ODE_Encoder(enc_layer),
+        ODE_Decoder(dec_layer),
         nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
         nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
         Generator(d_model, tgt_vocab))
@@ -294,7 +300,7 @@ def make_model(src_vocab, tgt_vocab, N=6,
     for p in model.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
-    return model
+    return model, enc_layer, dec_layer
 
 
 if __name__ == '__main__':

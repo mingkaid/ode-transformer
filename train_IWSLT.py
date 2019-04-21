@@ -29,14 +29,16 @@ parser.add_argument('--num-epochs', type=int, default=10)
 parser.add_argument('--model', type=str, choices=['transformer', 'ode'], default='ode')
 parser.add_argument('--warmup', type=int, default=2000)
 parser.add_argument('--print-interval', type=int, default=50)
+parser.add_argument('--resume-meters', type=eval, default=True, choices=[True, False])
 args = parser.parse_args()
 
-if args.model == 'transformer':
+is_ode = True if args.model == 'ode' else False
+if is_ode == True:
+    print('ODE transformer selected')
+    from transformer_ode import make_model, RunningAverageMeter
+else:
     print('Regular transformer selected')
     from transformer import make_model
-else:
-    print('ODE transformer selected')
-    from transformer_ode import make_model
 
 """
 Data Preprocessing
@@ -115,7 +117,16 @@ Train and evaluate
 Everything according to Vaswani et al. (2017) except warmup steps for NoamOpt
 """
 pad_idx = TGT.vocab.stoi["<blank>"]
-model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
+batch_time_meter = RunningAverageMeter()
+if is_ode == True:
+    model, enc_layer, dec_layer = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
+    f_nfe_meter_enc = RunningAverageMeter()
+    f_nfe_meter_dec = RunningAverageMeter()
+    b_nfe_meter_enc = RunningAverageMeter()
+    b_nfe_meter_dec = RunningAverageMeter()
+else:
+    model = make_model(len(SRC.vocab), len(TGT.vocab), N=6)
+    
 criterion = LabelSmoothing(size=len(TGT.vocab), padding_idx=pad_idx, smoothing=0.1)
 
 train_iter = MyIterator(train, batch_size=args.train_batch_size, device=args.device,
@@ -136,19 +147,34 @@ If resuming from checkpoint, load weights and optimizer state now
 """
 optimizer = torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9)
 if args.resume_checkpoint != None:
-    epoch, model, model_opt = load_checkpoint(model, optimizer, args.resume_checkpoint)
+    if is_ode == False:
+        epoch, model, model_opt = load_checkpoint(model, optimizer, args.resume_checkpoint)
+    else:
+        epoch, model, model_opt = load_checkpoint(model, optimizer, args.resume_checkpoint,
+                                                  is_ode=True, 
+                                                  f_nfe_meter_enc=f_nfe_meter_enc,
+                                                  f_nfe_meter_dec=f_nfe_meter_dec,
+                                                  b_nfe_meter_enc=b_nfe_meter_enc,
+                                                  b_nfe_meter_dec=b_nfe_meter_dec, 
+                                                  resume_meters = args.resume_meters)
     epoch += 1
-    model_used = nn.DataParallel(model, device_ids=devices)
+    if args.device == 'cuda':
+        model_used = nn.DataParallel(model, device_ids=devices)
+    else:
+        model_used = model
 else:
     epoch = 1
     model_size, factor, warmup = model.src_embed[0].d_model, 1, args.warmup
     model_opt = NoamOpt(model_size, factor, warmup, optimizer)
     model_used = model
 
-
+"""
+Run for the specified number of epochs
+"""
 for i in range(epoch, epoch + args.num_epochs):
     print('Epoch {}'.format(i))
     if args.device == 'cuda':
+        """ Adjust loss computing method to training device """
         train_loss_compute = MultiGPULossCompute(model.generator, criterion, 
                                                  devices=devices, opt=model_opt)
         val_loss_compute = MultiGPULossCompute(model.generator, criterion, 
@@ -158,23 +184,38 @@ for i in range(epoch, epoch + args.num_epochs):
                                                opt=model_opt)
         val_loss_compute = SimpleLossCompute(model.generator, criterion, 
                                              opt=None)
+    """ Train """    
     model_used.train()
-    run_epoch((rebatch(pad_idx, b) for b in train_iter), 
-              model_used, 
-              train_loss_compute, 
-              print_interval=args.print_interval)
+    if is_ode === True:
+        """ Record number of function evaluations if we are using ODE """
+        run_epoch((rebatch(pad_idx, b) for b in train_iter), model_used, 
+                 train_loss_compute, print_interval=args.print_interval,
+                 f_nfe_meter_enc=f_nfe_meter_enc, f_nfe_meter_dec=f_nfe_meter_dec,
+                 b_nfe_meter_enc=b_nfe_meter_enc, b_nfe_meter_dec=b_nfe_meter_dec,
+                 batch_time_meter=batch_time_meter, is_ode=is_ode)
+    else:
+        run_epoch((rebatch(pad_idx, b) for b in train_iter), model_used, 
+                 train_loss_compute, print_interval=args.print_interval,
+                 batch_time_meter, is_ode=is_ode)
     
+    """ Validate """
     model_used.eval()
     loss = run_epoch((rebatch(pad_idx, b) for b in valid_iter), 
                      model_used, 
                      val_loss_compute)
-    
     print('Val Loss: {:.4f}'.format(loss))
-    create_checkpoint(model, model_opt, i, loss, path=args.save)
+    
+    """ Save Progress """
+    if is_ode == False:
+        create_checkpoint(model, model_opt, i, loss, path=args.save)
+    else:
+        create_checkpoint(model, model_opt, i, loss, path=args.save,
+                          is_ode=True, 
+                          f_nfe_meter_enc=f_nfe_meter_enc,
+                          f_nfe_meter_dec=f_nfe_meter_dec,
+                          b_nfe_meter_enc=b_nfe_meter_enc,
+                          b_nfe_meter_dec=b_nfe_meter_dec)
 
 print('Training complete')
-"""
-Translate with Greedy Decoding
-"""
 
 
