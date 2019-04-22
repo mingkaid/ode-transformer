@@ -58,19 +58,6 @@ class ODE_Encoder(nn.Module):
         out = odeint(self.ode_layer, x, self.integration_time, rtol=TOL, atol=TOL)
         return self.norm(out[1])
     
-class SublayerRoutine(nn.Module):
-    """
-    Applies norm to input and dropout to output
-    Note for code simplicity the norm is first as opposed to last.
-    """
-    def __init__(self, size, dropout):
-        super(SublayerRoutine, self).__init__()
-        self.norm = LayerNorm(size)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, t, x, sublayer):
-        "Apply residual connection to any sublayer with the same size."
-        return self.dropout(sublayer(t, self.norm(x)))
 
 class ODE_EncoderLayer(nn.Module):
     "Encoder is made up of self-attn and feed forward (defined below)"
@@ -117,10 +104,16 @@ class ODE_Decoder(nn.Module):
 #         for layer in self.layers:
 #             x = layer(x, memory, src_mask, tgt_mask)
 #         return self.norm(x)
+        x_len = x.shape[1]
+        # Concatenate x and memory to pass into forward together
+        x = torch.cat([x, memory], dim=1)
+        self.ode_layer.set_forward_attributes(src_mask, tgt_mask, x_len)
+
         self.integration_time = self.integration_time.type_as(x)
-        self.ode_layer.set_forward_attributes(memory, src_mask, tgt_mask)
         out = odeint(self.ode_layer, x, self.integration_time, rtol=TOL, atol=TOL)
-        return self.norm(out[1])
+        
+        x = out[1][:, :x_len, :self.ode_layer.size]
+        return self.norm(x)
 
     
 class ODE_DecoderLayer(nn.Module):
@@ -132,37 +125,77 @@ class ODE_DecoderLayer(nn.Module):
         self.feed_forward = feed_forward
         self.src_mask = None
         self.tgt_mask = None
-        self.memory = None
         
-        self.sublayer = clones(SublayerRoutine(size, dropout), 3)        
-        # self.sublayer = clones(SublayerConnection(size, dropout), 2)
+        self.sublayer = clones(SublayerRoutine(size, dropout), 3)
         self.size = size
         self.nfe = 0
+        self.x_len = None
         
-    def set_forward_attributes(self, memory, src_mask, tgt_mask):
+    def set_forward_attributes(self, src_mask, tgt_mask, x_len):
         "Mandatory before calling forward, in order to set the mask for that operation"
-        self.memory = memory
+        # self.memory = memory
         self.src_mask = src_mask
         self.tgt_mask = tgt_mask
+        self.x_len = x_len
 
     def forward(self, t, x):
         "Follow Figure 1 (left) for connections."
         # print(t)
         self.nfe += 1
+        # Extract memory and x
+        m = x[:, self.x_len:, :]
+        x = x[:, :self.x_len, :]
         
         mh_masked = self.sublayer[0](t, x, lambda t, x: self.self_attn(t, x, x, x, self.tgt_mask))
         q = x + mh_masked
         
-        m = self.memory
+        # m = self.memory
         mh = self.sublayer[1](t, q, lambda t, x: self.src_attn(t, x, m, m, self.src_mask))
         a = q + mh
         
         ff = self.sublayer[2](t, a, self.feed_forward)
         dx = mh_masked + mh + ff
         
-        return dx
+        # Because m stays constant, its derivative during the transformation is set to 0
+        dm = torch.zeros_like(m)
+        out = torch.cat([dx, dm], dim=1)
+        return out
+    
+    
+class SublayerRoutine(nn.Module):
+    """
+    Applies norm to input and dropout to output
+    Note for code simplicity the norm is first as opposed to last.
+    """
+    def __init__(self, size, dropout):
+        super(SublayerRoutine, self).__init__()
+        self.norm = LayerNorm(size)
+        self.dropout = nn.Dropout(dropout)
 
+    def forward(self, t, x, sublayer):
+        "Apply residual connection to any sublayer with the same size."
+        return self.dropout(sublayer(t, self.norm(x)))
+    
+    
+# class MemorySublayerRoutine(nn.Module):
+#     """
+#     Applies norm to input and dropout to output
+#     Note for code simplicity the norm is first as opposed to last.
+#     """
+#     def __init__(self, size, dropout):
+#         super(MemorySublayerRoutine, self).__init__()
+#         self.norm = LayerNorm(size)
+#         self.dropout = nn.Dropout(dropout)
+#         self.size = size
 
+#     def forward(self, t, x, sublayer):
+#         "Apply residual connection to any sublayer with the same size."
+#         m = x[:, :, self.size:]
+#         x = self.norm(x[:, :, :self.size])
+#         x = torch.cat([x, m], dim=2)
+#         return self.dropout(sublayer(t, self.norm(x)))
+
+    
 class LayerNorm(nn.Module):
     "Construct a layernorm module (See citation for details)."
     def __init__(self, features, eps=1e-6):

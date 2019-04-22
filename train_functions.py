@@ -16,6 +16,8 @@ seaborn.set_context(context="talk")
 class Batch:
     "Object for holding a batch of data with mask during training."
     def __init__(self, src, trg=None, pad=0):
+        #print(src)
+        #print(trg)
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if trg is not None:
@@ -81,12 +83,12 @@ def run_epoch(data_iter, model, loss_compute, print_interval=50,
         if (i-1) % print_interval == 0:
             elapsed = time.time() - start
             if not is_ode:
-                print("Epoch Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
+                print("Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
                       i, loss / batch.ntokens.item(), tokens / elapsed), end='\r')
             else:
-                print("Epoch Step: {} Loss: {:f} Tokens per Sec: {:f} ".format(
+                print("Step: {} Loss: {:.4f} Tokens/Sec: {:.2f} ".format(
                       i, loss / batch.ntokens.item(), tokens / elapsed) +
-                      'F-NFE-enc {:.2f} F-NFE-dec {:.2f} B-NFE-enc {:.2f} B-NFE-dec {:.2f}'.format( 
+                      'NFE: F-enc {:.1f} F-dec {:.1f} B-enc {:.1f} B-dec {:.1f}'.format( 
                       f_nfe_meter_enc.avg, f_nfe_meter_dec.avg, b_nfe_meter_enc.avg, b_nfe_meter_dec.avg),
                       end='\r')
             start = time.time()
@@ -284,6 +286,7 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/',
                       batch_time_meter=None):
     if not os.path.isdir(path):
         os.mkdir(path)
+    if is_ode: name = 'ode_' + name
     model_sd = model.state_dict()
     opt_sd = model_opt.optimizer.state_dict()
     checkpoint = {
