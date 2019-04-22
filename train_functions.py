@@ -16,6 +16,8 @@ seaborn.set_context(context="talk")
 class Batch:
     "Object for holding a batch of data with mask during training."
     def __init__(self, src, trg=None, pad=0):
+        #print(src)
+        #print(trg)
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if trg is not None:
@@ -34,7 +36,11 @@ class Batch:
         return tgt_mask
 
 
-def run_epoch(data_iter, model, loss_compute):
+def run_epoch(data_iter, model, loss_compute, print_interval=50, 
+              is_ode=False, enc_layer=None, dec_layer=None,
+              f_nfe_meter_enc=None, b_nfe_meter_enc=None,
+              f_nfe_meter_dec=None, b_nfe_meter_dec=None,
+              batch_time_meter=None, use_meters=True):
     "Standard Training and Logging Function"
     start = time.time()
     total_tokens = 0
@@ -42,21 +48,72 @@ def run_epoch(data_iter, model, loss_compute):
     tokens = 0
     i = 0
     for _, batch in enumerate(data_iter):
+        batch_start = time.time()
+        
         out = model.forward(batch.src, batch.trg, 
                             batch.src_mask, batch.trg_mask)
+        if use_meters and is_ode:
+            # Record number of function evaluations in the encoder and decoder layers
+            nfe_forward_enc = enc_layer.nfe
+            enc_layer.nfe = 0
+            nfe_forward_dec = dec_layer.nfe
+            dec_layer.nfe = 0
+            
         loss = loss_compute(out, batch.trg_y, batch.ntokens)
+        if use_meters and is_ode:
+            nfe_backward_enc = enc_layer.nfe
+            enc_layer.nfe = 0
+            nfe_backward_dec = dec_layer.nfe
+            dec_layer.nfe = 0
+        
         total_loss += loss
         total_tokens += batch.ntokens.item()
         tokens += batch.ntokens.item()
+        
+        if use_meters == True:
+            batch_time_meter.update(time.time() - batch_start)
+            if is_ode:
+                f_nfe_meter_enc.update(nfe_forward_enc)
+                f_nfe_meter_dec.update(nfe_forward_dec)
+                b_nfe_meter_enc.update(nfe_backward_enc)
+                b_nfe_meter_dec.update(nfe_backward_dec)
+        
         i += 1
         #print(i)
-        if i % 50 == 1:
+        if (i-1) % print_interval == 0:
             elapsed = time.time() - start
-            print("Epoch Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
-                  i, loss / batch.ntokens.item(), tokens / elapsed))
+            if not is_ode:
+                print("Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
+                      i, loss / batch.ntokens.item(), tokens / elapsed), end='\r')
+            else:
+                print("Step: {} Loss: {:.4f} Tokens/Sec: {:.2f} ".format(
+                      i, loss / batch.ntokens.item(), tokens / elapsed) +
+                      'NFE: F-enc {:.1f} F-dec {:.1f} B-enc {:.1f} B-dec {:.1f}'.format( 
+                      f_nfe_meter_enc.avg, f_nfe_meter_dec.avg, b_nfe_meter_enc.avg, b_nfe_meter_dec.avg),
+                      end='\r')
             start = time.time()
             tokens = 0
+    print()
     return total_loss / total_tokens
+
+
+class RunningAverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self, momentum=0.99):
+        self.momentum = momentum
+        self.reset()
+
+    def reset(self):
+        self.val = None
+        self.avg = 0
+
+    def update(self, val):
+        if self.val is None:
+            self.avg = val
+        else:
+            self.avg = self.avg * self.momentum + val * (1 - self.momentum)
+        self.val = val
 
 
 class SimpleLossCompute:
@@ -75,7 +132,69 @@ class SimpleLossCompute:
             self.opt.step()
             self.opt.optimizer.zero_grad()
         return loss.item() * norm.float().item()
+    
+"""
+Multi-GPU Loss Compute
+"""
+# Skip if not interested in multigpu.
+class MultiGPULossCompute:
+    "A multi-gpu loss compute and train function."
+    def __init__(self, generator, criterion, devices, opt=None, chunk_size=5):
+        # Send out to different gpus.
+        self.generator = generator
+        self.criterion = nn.parallel.replicate(criterion, 
+                                               devices=devices)
+        self.opt = opt
+        self.devices = devices
+        self.chunk_size = chunk_size
+        
+    def __call__(self, out, targets, normalize):
+        total = 0.0
+        generator = nn.parallel.replicate(self.generator, 
+                                                devices=self.devices)
+        out_scatter = nn.parallel.scatter(out, 
+                                          target_gpus=self.devices)
+        out_grad = [[] for _ in out_scatter]
+        targets = nn.parallel.scatter(targets, 
+                                      target_gpus=self.devices)
 
+        # Divide generating into chunks.
+        chunk_size = self.chunk_size
+        for i in range(0, out_scatter[0].size(1), chunk_size):
+            # Predict distributions
+            out_column = [[Variable(o[:, i:i+chunk_size].data, 
+                                    requires_grad=self.opt is not None)] 
+                           for o in out_scatter]
+            gen = nn.parallel.parallel_apply(generator, out_column)
+
+            # Compute loss. 
+            y = [(g.contiguous().view(-1, g.size(-1)), 
+                  t[:, i:i+chunk_size].contiguous().view(-1)) 
+                 for g, t in zip(gen, targets)]
+            loss = nn.parallel.parallel_apply(self.criterion, y)
+
+            # Sum and normalize loss
+            l = nn.parallel.gather(loss, 
+                                   target_device=self.devices[0])
+            l = l.sum() / normalize
+            total += l.item()
+
+            # Backprop loss to output of transformer
+            if self.opt is not None:
+                l.backward()
+                for j, l in enumerate(loss):
+                    out_grad[j].append(out_column[j][0].grad.data.clone())
+
+        # Backprop all loss through transformer.            
+        if self.opt is not None:
+            out_grad = [Variable(torch.cat(og, dim=1)) for og in out_grad]
+            o1 = out
+            o2 = nn.parallel.gather(out_grad, 
+                                    target_device=self.devices[0])
+            o1.backward(gradient=o2)
+            self.opt.step()
+            self.opt.optimizer.zero_grad()
+        return total * normalize.float().item()
 
 """
 Regularization
@@ -160,9 +279,14 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol):
 """
 Creates checkpoint adapted to the NoamOpt training scheme
 """
-def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/', name='checkpoint_epoch'):
+def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/', 
+                      name='checkpoint_epoch', is_ode=False, 
+                      f_nfe_meter_enc=None, b_nfe_meter_enc=None,
+                      f_nfe_meter_dec=None, b_nfe_meter_dec=None,
+                      batch_time_meter=None):
     if not os.path.isdir(path):
         os.mkdir(path)
+    if is_ode: name = 'ode_' + name
     model_sd = model.state_dict()
     opt_sd = model_opt.optimizer.state_dict()
     checkpoint = {
@@ -175,15 +299,27 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/', name
             'warmup': model_opt.warmup,
             '_step': model_opt._step,
             '_rate': model_opt._rate
-        }
+        },
+        'val_loss': val_loss,
+        'batch_time_avg': batch_time_meter.avg
     }
+    
+    if is_ode == True:
+        checkpoint['f_nfe_enc_avg'] = f_nfe_meter_enc.avg
+        checkpoint['f_nfe_dec_avg'] = f_nfe_meter_dec.avg
+        checkpoint['b_nfe_enc_avg'] = b_nfe_meter_enc.avg
+        checkpoint['b_nfe_dec_avg'] = b_nfe_meter_dec.avg
+    
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_name = '{}{}_{}.tar'.format(name, epoch, timestamp)
     checkpoint_path = os.path.join(path, checkpoint_name)
     torch.save(checkpoint, checkpoint_path)
     print('Epoch {}: Checkpoint saved at {}'.format(epoch, checkpoint_path))
     
-def load_checkpoint(model, optimizer, checkpoint_path):
+def load_checkpoint(model, optimizer, checkpoint_path, is_ode=False, 
+                    f_nfe_meter_enc=None, b_nfe_meter_enc=None,
+                    f_nfe_meter_dec=None, b_nfe_meter_dec=None,
+                    batch_time_meter=None, load_meters=True, resume_meters=True):
     """
     Parameters:
         model: An nn.Module that corresponds to the model saved in the specified checkpoint
@@ -200,6 +336,23 @@ def load_checkpoint(model, optimizer, checkpoint_path):
                        noam_state_dict['warmup'], optimizer)
     model_opt._step = noam_state_dict['_step']
     model_opt._rate = noam_state_dict['_rate']
+    
+    if load_meters == True:
+        batch_time_meter.avg = checkpoint['batch_time_avg']
+        if resume_meters == True: batch_time_meter.val = 0
+            
+        if is_ode == True:
+            f_nfe_meter_enc.avg = checkpoint['f_nfe_enc_avg']
+            f_nfe_meter_dec.avg = checkpoint['f_nfe_dec_avg']
+            b_nfe_meter_enc.avg = checkpoint['b_nfe_enc_avg']
+            b_nfe_meter_dec.avg = checkpoint['b_nfe_dec_avg']
+            if resume_meters == True:
+                f_nfe_meter_enc.val = 0
+                f_nfe_meter_dec.val = 0
+                b_nfe_meter_enc.val = 0
+                b_nfe_meter_dec.val = 0
+    
+    print('Loaded checkpoint at epoch {}'.format(epoch))
     return epoch, model, model_opt
 
 
