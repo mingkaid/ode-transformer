@@ -40,7 +40,8 @@ def run_epoch(data_iter, model, loss_compute, print_interval=50,
               is_ode=False, enc_layer=None, dec_layer=None,
               f_nfe_meter_enc=None, b_nfe_meter_enc=None,
               f_nfe_meter_dec=None, b_nfe_meter_dec=None,
-              batch_time_meter=None, use_meters=True):
+              batch_time_meter=None, train_loss_meter=None,
+              use_meters=True):
     "Standard Training and Logging Function"
     start = time.time()
     total_tokens = 0
@@ -72,6 +73,7 @@ def run_epoch(data_iter, model, loss_compute, print_interval=50,
         
         if use_meters == True:
             batch_time_meter.update(time.time() - batch_start)
+            train_loss_meter.update(loss / batch.ntokens.item())
             if is_ode:
                 f_nfe_meter_enc.update(nfe_forward_enc)
                 f_nfe_meter_dec.update(nfe_forward_dec)
@@ -83,13 +85,15 @@ def run_epoch(data_iter, model, loss_compute, print_interval=50,
         if (i-1) % print_interval == 0:
             elapsed = time.time() - start
             if not is_ode:
-                print("Step: {} Loss: {:f} Tokens per Sec: {:f}".format(
+                print("Step {} Loss {:f} Tokens/Sec {:f}".format(
                       i, loss / batch.ntokens.item(), tokens / elapsed), end='\r')
             else:
-                print("Step: {} Loss: {:.4f} Tokens/Sec: {:.2f} ".format(
-                      i, loss / batch.ntokens.item(), tokens / elapsed) +
-                      'NFE: F-enc {:.1f} F-dec {:.1f} B-enc {:.1f} B-dec {:.1f}'.format( 
-                      f_nfe_meter_enc.avg, f_nfe_meter_dec.avg, b_nfe_meter_enc.avg, b_nfe_meter_dec.avg),
+                print("Step {} Loss {:.4f} Tokens/Sec {:.2f} "
+                      'NFE: F-enc {:.1f} F-dec {:.1f} B-enc {:.1f} B-dec {:.1f}'.format(
+                          i, loss / batch.ntokens.item(), tokens / elapsed, 
+                          f_nfe_meter_enc.avg, f_nfe_meter_dec.avg, 
+                          b_nfe_meter_enc.avg, b_nfe_meter_dec.avg
+                      ),
                       end='\r')
             start = time.time()
             tokens = 0
@@ -107,6 +111,7 @@ class RunningAverageMeter(object):
     def reset(self):
         self.val = None
         self.avg = 0
+        self.hist = []
 
     def update(self, val):
         if self.val is None:
@@ -114,6 +119,7 @@ class RunningAverageMeter(object):
         else:
             self.avg = self.avg * self.momentum + val * (1 - self.momentum)
         self.val = val
+        self.hist.append(val)
 
 
 class SimpleLossCompute:
@@ -283,7 +289,7 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/',
                       name='checkpoint_epoch', is_ode=False, 
                       f_nfe_meter_enc=None, b_nfe_meter_enc=None,
                       f_nfe_meter_dec=None, b_nfe_meter_dec=None,
-                      batch_time_meter=None):
+                      batch_time_meter=None, train_loss_meter=None):
     if not os.path.isdir(path):
         os.mkdir(path)
     if is_ode: name = 'ode_' + name
@@ -301,14 +307,24 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/',
             '_rate': model_opt._rate
         },
         'val_loss': val_loss,
-        'batch_time_avg': batch_time_meter.avg
+        'batch_time_avg': batch_time_meter.avg,
+        'batch_time_hist': batch_time_meter.hist,
+        'train_loss_avg': train_loss_meter.avg,
+        'train_loss_hist': train_loss_meter.hist
     }
     
     if is_ode == True:
         checkpoint['f_nfe_enc_avg'] = f_nfe_meter_enc.avg
+        checkpoint['f_nfe_enc_hist'] = f_nfe_meter_enc.hist
+        
         checkpoint['f_nfe_dec_avg'] = f_nfe_meter_dec.avg
+        checkpoint['f_nfe_dec_hist'] = f_nfe_meter_dec.hist
+        
         checkpoint['b_nfe_enc_avg'] = b_nfe_meter_enc.avg
+        checkpoint['b_nfe_enc_hist'] = b_nfe_meter_enc.hist
+        
         checkpoint['b_nfe_dec_avg'] = b_nfe_meter_dec.avg
+        checkpoint['b_nfe_dec_hist'] = b_nfe_meter_dec.hist
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     checkpoint_name = '{}{}_{}.tar'.format(name, epoch, timestamp)
@@ -319,7 +335,8 @@ def create_checkpoint(model, model_opt, epoch, val_loss, path='./outputs/',
 def load_checkpoint(model, optimizer, checkpoint_path, is_ode=False, 
                     f_nfe_meter_enc=None, b_nfe_meter_enc=None,
                     f_nfe_meter_dec=None, b_nfe_meter_dec=None,
-                    batch_time_meter=None, load_meters=True, resume_meters=True):
+                    batch_time_meter=None, train_loss_meter=None,
+                    load_meters=True, resume_meters=True):
     """
     Parameters:
         model: An nn.Module that corresponds to the model saved in the specified checkpoint
@@ -339,7 +356,10 @@ def load_checkpoint(model, optimizer, checkpoint_path, is_ode=False,
     
     if load_meters == True:
         batch_time_meter.avg = checkpoint['batch_time_avg']
-        if resume_meters == True: batch_time_meter.val = 0
+        train_loss_meter.avg = checkpoint['train_loss_avg']
+        if resume_meters == True: 
+            batch_time_meter.val = 0
+            train_loss_meter.val = 0
             
         if is_ode == True:
             f_nfe_meter_enc.avg = checkpoint['f_nfe_enc_avg']

@@ -13,8 +13,6 @@ from transformer_functions import clones, subsequent_mask, attention
 # %matplotlib inline
 from torchdiffeq import odeint_adjoint as odeint
 
-TOL = 1e-3
-
 class EncoderDecoder(nn.Module):
     """
     A standard Encoder-Decoder architecture. Base for this and many 
@@ -42,12 +40,13 @@ class EncoderDecoder(nn.Module):
 
 class ODE_Encoder(nn.Module):
     "Core encoder is a stack of N layers"
-    def __init__(self, ode_layer):
+    def __init__(self, ode_layer, tol=1e-3):
         super(ODE_Encoder, self).__init__()
         #self.layers = clones(layer, N)
         self.ode_layer = ode_layer
         self.norm = LayerNorm(ode_layer.size)
         self.integration_time = torch.tensor([0, 1]).float()
+        self.tol = tol
         
     def forward(self, x, mask):
         "Pass the input (and mask) through each layer in turn."
@@ -55,7 +54,7 @@ class ODE_Encoder(nn.Module):
 #             x = layer(x, mask)
         self.integration_time = self.integration_time.type_as(x)
         self.ode_layer.set_mask(mask)
-        out = odeint(self.ode_layer, x, self.integration_time, rtol=TOL, atol=TOL)
+        out = odeint(self.ode_layer, x, self.integration_time, rtol=self.tol, atol=self.tol)
         return self.norm(out[1])
     
 
@@ -94,11 +93,12 @@ class ODE_EncoderLayer(nn.Module):
     
 class ODE_Decoder(nn.Module):
     "Generic N layer decoder with masking."
-    def __init__(self, ode_layer):
+    def __init__(self, ode_layer, tol=1e-3):
         super(ODE_Decoder, self).__init__()
         self.ode_layer = ode_layer
         self.norm = LayerNorm(ode_layer.size)
         self.integration_time = torch.tensor([0, 1]).float()
+        self.tol = tol
         
     def forward(self, x, memory, src_mask, tgt_mask):
 #         for layer in self.layers:
@@ -110,7 +110,34 @@ class ODE_Decoder(nn.Module):
         self.ode_layer.set_forward_attributes(src_mask, tgt_mask, x_len)
 
         self.integration_time = self.integration_time.type_as(x)
-        out = odeint(self.ode_layer, x, self.integration_time, rtol=TOL, atol=TOL)
+        out = odeint(self.ode_layer, x, self.integration_time, rtol=self.tol, atol=self.tol)
+        
+        x = out[1][:, :x_len, :self.ode_layer.size]
+        return self.norm(x)
+    
+    
+class Visual_ODE_Decoder(nn.Module):
+    "Generic N layer decoder with masking."
+    def __init__(self, ode_layer, tol=1e-3):
+        super(Visual_ODE_Decoder, self).__init__()
+        self.ode_layer = ode_layer
+        self.norm = LayerNorm(ode_layer.size)
+        self.integration_time = torch.tensor([0, 1]).float()
+        self.tol = tol
+        
+    def forward(self, x, memory, src_mask, tgt_mask):
+#         for layer in self.layers:
+#             x = layer(x, memory, src_mask, tgt_mask)
+#         return self.norm(x)
+        x_len = x.shape[1]
+        # Concatenate x and memory to pass into forward together
+        x = torch.cat([x, memory], dim=1)
+        self.ode_layer.self_attn.attns = []
+        self.ode_layer.src_attn.attns = []
+        self.ode_layer.set_forward_attributes(src_mask, tgt_mask, x_len)
+
+        self.integration_time = self.integration_time.type_as(x)
+        out = odeint(self.ode_layer, x, self.integration_time, rtol=self.tol, atol=self.tol)
         
         x = out[1][:, :x_len, :self.ode_layer.size]
         return self.norm(x)
@@ -248,6 +275,47 @@ class ConcatMultiHeadedAttention(nn.Module):
         x = x.transpose(1, 2).contiguous() \
              .view(nbatches, -1, self.h * self.d_k)
         return self.linears[-1](x)
+    
+    
+class VisualMultiHeadedAttention(nn.Module):
+    def __init__(self, h, d_model, dropout=0.1):
+        "Take in model size and number of heads."
+        super(VisualMultiHeadedAttention, self).__init__()
+        assert d_model % h == 0
+        # We assume d_v always equals d_k
+        self.d_k = d_model // h
+        self.h = h
+        self.linears = clones(nn.Linear(d_model, d_model), 3)
+        self.linear_V = nn.Linear(d_model + 1, d_model)
+        self.attns = []
+        self.dropout = nn.Dropout(p=dropout)
+        
+    def forward(self, t, query, key, value, mask=None):
+        "Implements Figure 2"
+        if mask is not None:
+            # Same mask applied to all h heads.
+            mask = mask.unsqueeze(1)
+        nbatches = query.size(0)
+        
+        # 1) Do all the linear projections in batch from d_model => h x d_k 
+        query, key = \
+            [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+             for l, x in zip(self.linears, (query, key))]
+        
+        # Concat t to the back of value
+        tt = torch.ones_like(value[:, :, :1]) * t
+        value = torch.cat([tt, value], 2)
+        value = self.linear_V(value).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        
+        # 2) Apply attention on all the projected vectors in batch. 
+        x, attn = attention(query, key, value, mask=mask, 
+                                 dropout=self.dropout)
+        self.attns.append(attn)
+        
+        # 3) "Concat" using a view and apply a final linear. 
+        x = x.transpose(1, 2).contiguous() \
+             .view(nbatches, -1, self.h * self.d_k)
+        return self.linears[-1](x)
 
     
 class Generator(nn.Module):
@@ -335,9 +403,32 @@ def make_model(src_vocab, tgt_vocab, N=6,
             nn.init.xavier_uniform_(p)
     return model, enc_layer, dec_layer
 
+def make_visual_model(src_vocab, tgt_vocab, N=6, 
+               d_model=512, d_ff=2048, h=8, dropout=0.1):
+    "Helper: Construct a model from hyperparameters."
+    c = copy.deepcopy
+    attn = VisualMultiHeadedAttention(h, d_model)
+    ff = ConcatPositionwiseFeedForward(d_model, d_ff, dropout)
+    position = PositionalEncoding(d_model, dropout)
+    enc_layer = ODE_EncoderLayer(d_model, c(attn), c(ff), dropout)
+    dec_layer = ODE_DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout)
+    model = EncoderDecoder(
+        ODE_Encoder(enc_layer),
+        Visual_ODE_Decoder(dec_layer),
+        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
+        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
+        Generator(d_model, tgt_vocab))
+    
+    # This was important from their code. 
+    # Initialize parameters with Glorot / fan_avg.
+    for p in model.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    return model, enc_layer, dec_layer
+
 
 if __name__ == '__main__':
-	transformer = make_model(src_vocab=10, tgt_vocab=10)
+    transformer = make_model(src_vocab=10, tgt_vocab=10)
 
 
 
