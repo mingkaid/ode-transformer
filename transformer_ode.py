@@ -131,6 +131,7 @@ class Visual_ODE_Decoder(nn.Module):
 #         return self.norm(x)
         x_len = x.shape[1]
         # Concatenate x and memory to pass into forward together
+
         x = torch.cat([x, memory], dim=1)
         self.ode_layer.self_attn.attns = []
         self.ode_layer.src_attn.attns = []
